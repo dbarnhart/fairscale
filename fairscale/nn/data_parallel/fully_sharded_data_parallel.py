@@ -259,6 +259,7 @@ class FullyShardedDataParallel(nn.Module):
         module: nn.Module,
         process_group: Optional[ProcessGroup] = None,
         reshard_after_forward: bool = True,
+        reshard_after_backward: bool = True,
         mixed_precision: bool = False,
         fp32_reduce_scatter: bool = False,
         flatten_parameters: bool = True,
@@ -281,6 +282,7 @@ class FullyShardedDataParallel(nn.Module):
         self.rank = self.process_group.rank()
         self.world_size = self.process_group.size()
         self.reshard_after_forward = reshard_after_forward
+        self.reshard_after_backward = reshard_after_backward
         self.mixed_precision = mixed_precision
         self.fp32_reduce_scatter = fp32_reduce_scatter
         self.flatten_parameters = flatten_parameters
@@ -630,6 +632,7 @@ class FullyShardedDataParallel(nn.Module):
         if self.verbose:
             repr = (
                 f"rank={self.rank}, " + repr + f"reshard_after_forward={self.reshard_after_forward}, "
+                f"reshard_after_backward={self.reshard_after_backward}, "
                 f"compute_dtype={self.compute_dtype}, "
                 f"buffer_dtype={self.buffer_dtype}, "
                 f"fp32_reduce_scatter={self.fp32_reduce_scatter}, "
@@ -967,6 +970,7 @@ class FullyShardedDataParallel(nn.Module):
             # since those params will be needed immediately after for the
             # backward pass.
             self.reshard_after_forward = False
+            self.reshard_after_backward = False
 
             # Due to the use of streams, we need to make sure the previous
             # ``optim.step()`` is done before we all-gather parameters.
@@ -1211,13 +1215,9 @@ class FullyShardedDataParallel(nn.Module):
             # boolean guard below, which is incorrect. It worked in pytorch < 1.9 for
             # some unknown reason, but pytorch 1.10 nightly exposed this bug.
             #
-            # Note, both ``self._rebuild_full_params`` and ``self._use_full_params`` are
-            # idempotent.  So in case they are called unnecessarily, they don't incur much
-            # overhead.
-            if self.reshard_after_forward:
-                self._rebuild_full_params()
-            else:
-                self._use_full_params()
+            # Note, both ``self._rebuild_full_params`` is idempotent.  So in case it is
+            # called unnecessarily, it doesn't incur much overhead.
+            self._rebuild_full_params()
 
             # Only run the ``self._prep_grads_for_backward`` once per iteration (i.e. in case
             # it is multiple outputs or multiple forward passes).
@@ -1325,7 +1325,7 @@ class FullyShardedDataParallel(nn.Module):
         if param.grad.requires_grad:
             raise RuntimeError("FSDP only works with gradients that don't require gradients")
 
-        if self._require_backward_grad_sync or self.reshard_after_forward:
+        if self._require_backward_grad_sync and self.reshard_after_backward:
             # Free full params. As a special case, we don't free the full params
             # when in a ``no_sync`` context (as inversely indicated by
             # ``self._require_backward_grad_sync``), since the params will not
@@ -1472,6 +1472,10 @@ class FullyShardedDataParallel(nn.Module):
 
         def _finalize_parameters(fsdp_module: FullyShardedDataParallel) -> None:
             """Helper used below on all fsdp modules."""
+            # Make sure full parameters are freed, so that they are gathered fresh for the next forward pass. Otherwise,
+            # we will not have the updated parameters if resharding is disabled for both forward and backward.
+            if fsdp_module._require_backward_grad_sync:
+                fsdp_module._free_full_params()
             for p in fsdp_module.params:
                 if not p.requires_grad:
                     continue
@@ -2193,6 +2197,7 @@ def auto_wrap_bn(
             # **must** be False because BN's FSDP wrapper's pre-backward callback isn't called
             # within the checkpoint's outer backward when multiple forward passes are used.
             "reshard_after_forward": False,
+            "reshard_after_backward": True,
             # No bucketing or small bucketing should be enough for BNs.
             "bucket_cap_mb": 0,
             # Setting this for SyncBatchNorm. This may have a performance impact. If
