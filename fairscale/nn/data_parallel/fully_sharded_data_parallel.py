@@ -1410,11 +1410,10 @@ class FullyShardedDataParallel(nn.Module):
             # Note, both ``self._rebuild_full_params`` and ``self._use_full_params`` are
             # idempotent.  So in case they are called unnecessarily, they don't incur much
             # overhead.
-            self._rebuild_full_params()
-            # if self.ssd_offload or self.reshard_after_forward:
-            #     self._rebuild_full_params()
-            # else:
-            #     self._use_full_params()
+            if self.ssd_offload or not self.has_full_params:
+                self._rebuild_full_params()
+            else:
+                self._use_full_params()
 
             # Only run the ``self._prep_grads_for_backward`` once per iteration (i.e. in case
             # it is multiple outputs or multiple forward passes).
@@ -1708,7 +1707,7 @@ class FullyShardedDataParallel(nn.Module):
             """Helper used below on all fsdp modules."""
             # Make sure full parameters are freed, so that they are gathered fresh for the next forward pass. Otherwise,
             # we will not have the updated parameters if resharding is disabled for both forward and backward.
-            if fsdp_module._require_backward_grad_sync:
+            if fsdp_module._require_backward_grad_sync and self.has_full_params:
                 fsdp_module._free_full_params()
             for p in fsdp_module.params:
                 if not p.requires_grad:
