@@ -4,10 +4,60 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## NEXT - TBD
-### Fixed
+## [0.4.5] - TBD
 
 ### Added
+
+### Changed
+
+## [0.4.4] - 2021-12-21
+
+### Fixed
+- Inf/nan check on all gradient tensors in ShardedGradScaler [#890]
+- Allow user to supress warning on trainable_parameter in sharded_ddp.py [#886]
+- KeyError in certain FSDP wrapping scenarios [#881]
+
+### Added
+- Support eval mode in MEVO [#884]
+- A new benchmark for the MOE model [#866]
+
+### Changed
+- Fixed a corner case of FSDP init order and losing one of the flags [#880]
+
+## [0.4.3] - 2021-11-18
+
+### Added
+- Sharded Grad Scaler works with cpu offload in mixed and full precision. [#831]
+- API for specifying SSD offload for params with FSDP. You can use a OffloadConfig to specify the type of offload
+  and the file path for storing params on SSD. Note: This is an experimental feature. [#855]
+
+### Changed
+- MEVO: fixed eval and checkpointing code paths [#851]
+- Cleanup: Moving forward we would be testing all of our code with Python 3.9.7, CUDA 11.2 and the following three versions of PyTorch [#847]:
+  - the most recent stable version
+  - the most recent LTS version
+  - a recent nightly build
+
+## [0.4.2] - 2021-11-08
+### Fixed
+- FSDP: Fixed an pre-backward hook bug for certain type of models and FSDP config. [#833]
+
+### Added
+- FSDP: Add support for SSD offload for eval workloads. This is a new experimental feature and should be
+        used with caution.
+- LayerwiseMemoryTracker[feature][experimental]: This is a new experimental tool to help track, visualize and suggest fix for memory issues occurring during the forward/backward pass of your models. [#808]
+- FSDP: limited support of shared weights between FSDP wrappers. This allows large parameter
+          and gradient memory to be sharded despite being needed from different layers due to
+          weight sharing. [#836]
+- OffloadModel: Fix node names to enable correct sharding in auto_shard.py [#830]
+- OSS: Relaxed speed and memory constraints on OSS golden data due to regression when we bumped up the
+       PyTorch version to 1.9. [#828] [#825]
+- Chore: Update PyTorch version that we run benchmarks with. [#823]
+- Chore: Update PyTorch version that we run test with. [#809]
+- OffloadModel: Extend auto_shard.py to allow dealing with conditionals automatically when tracing with
+                torch.fx. This will work for most cases except when the conditional is part of the root instance. [#817]
+- [MEVO]: a custom layer to help big vocab trainings. Experimental. Docs is still TBD. [#840]
+- SlowMoDistributedDataParallel[feature][experimental] - This is a distributed training wrapper which should be useful on clusters with slow network interconnects (eg Ethernet). This improves on performance as compared to Distributed Data Parallel in such clusters. [#378]
 
 ## [0.4.1] - 2021-09-17
 ### Fixed

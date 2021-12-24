@@ -22,13 +22,20 @@ FairScale was designed with the following values in mind:
 
 ## What's New:
 
+* December 2021 [fairscale 0.4.4 was released](https://github.com/facebookresearch/fairscale/releases/tag/v0.4.4).
+* FairScale is tested with the following PyTorch versions (with CUDA 11.2): 1.8.1, 1.10.0 and 1.11.0.dev20211101+cu111.
+* November 2021 [fairscale 0.4.3 was released](https://github.com/facebookresearch/fairscale/releases/tag/v0.4.3).
+* We have experimental support for offloading params to disk when using the FSDP API for evaluation workloads.
+* We have an experimental layer that fuses multiple layers together to support large vocab size trainings.
+* November 2021 [fairscale 0.4.2 was released](https://github.com/facebookresearch/fairscale/releases/tag/v0.4.2).
+* We have a new experimental API called the LayerwiseMemoryTracker to help track, visualize and suggest fixes for memory issues occurring during the forward/backward pass of your models.
+* Introducing SlowMoDistributedDataParallel API, a distributed training wrapper that is useful on clusters with slow network interconnects (e.g. Ethernet).
 * September 2021 [`master` branch renamed to `main`](https://github.com/github/renaming).
-* September 2021 [fairscale 0.4.1 was released](https://github.com/facebookresearch/fairscale/releases/tag/v0.4.1).
 
 ## Installation
 
-To install FairScale, please see the following [instructions](https://github.com/facebookresearch/fairscale/blob/main/docs/source/installation_instructions.rst). You should be able to install a pip package or
-build directly from source.
+To install FairScale, please see the following [instructions](https://github.com/facebookresearch/fairscale/blob/main/docs/source/installation_instructions.rst).
+You should be able to install a package with pip or conda, or build directly from source.
 
 ## Getting Started
 The full [documentation](https://fairscale.readthedocs.io/) contains instructions for getting started, deep dives and tutorials about the various FairScale APIs.
@@ -151,7 +158,12 @@ At a high level, we want ML researchers to:
 
 ## Testing
 
-We use circleci to test on PyTorch versions 1.6.0, 1.7.1, and 1.8.1. Please create an [issue](https://github.com/facebookresearch/fairscale/issues) if you are having trouble with installation.
+We use circleci to test FairScale with the following PyTorch versions (with CUDA 11.2):
+* the latest stable release (1.10.0)
+* the latest LTS release (1.8.1)
+* a recent nightly release (1.11.0.dev20211101+cu111)
+
+Please create an [issue](https://github.com/facebookresearch/fairscale/issues) if you are having trouble with installation.
 
 ## Contributors
 

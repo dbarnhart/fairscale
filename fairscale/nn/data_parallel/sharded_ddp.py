@@ -31,7 +31,7 @@ def _trainable(param: torch.Tensor) -> bool:
 
 
 class ShardedDataParallel(nn.Module):
-    """ Wrap the model, and reduce the gradients to the right rank during the backward pass.
+    """Wrap the model, and reduce the gradients to the right rank during the backward pass.
 
     - the partition is given by the sharded optimizer
     - wrap the base model with a model which knows where to reduce each gradient
@@ -63,6 +63,9 @@ class ShardedDataParallel(nn.Module):
         reduce_fp16 (bool):
             cast the grads to fp16 before reducing. Not needed if the model is already fp16, but will probably improve performance
             for multi node jobs using PyTorch AMP. The effect is similar to DDP's fp16_compress_hook_ and will also save some memory.
+        warn_on_trainable_params_changed (bool):
+            When set to False no warning will be logged whenever a parameter trainability change has been detected.
+            Default is True.
 
     .. _fp16_compress_hook: https://pytorch.org/docs/1.8.0/ddp_comm_hooks.html?highlight=fp16#torch.distributed.algorithms.ddp_comm_hooks.default_hooks.fp16_compress_hook
 
@@ -100,6 +103,7 @@ class ShardedDataParallel(nn.Module):
         reduce_buffer_size: int = 2 ** 23,
         auto_refresh_trainable: bool = True,
         reduce_fp16: bool = False,
+        warn_on_trainable_params_changed: bool = True,
     ):
         super().__init__()
 
@@ -115,6 +119,8 @@ class ShardedDataParallel(nn.Module):
             logging.warning(
                 "fp16 gradient reduction is not compatible with reduction buffers, which are requested. fp16 grad reduction is deactivated."
             )
+
+        self._warn_on_trainable_params_changed = warn_on_trainable_params_changed
 
         # Handle a no_sync() context which prevents the gradient synchronization,
         # accumulate in place
@@ -224,7 +230,10 @@ class ShardedDataParallel(nn.Module):
             return self.module(*inputs, **kwargs)
 
     def to(  # type: ignore
-        self, device: Optional[torch.device], dtype: Optional[torch.dtype] = None, non_blocking: bool = False,
+        self,
+        device: Optional[torch.device],
+        dtype: Optional[torch.dtype] = None,
+        non_blocking: bool = False,
     ) -> "ShardedDataParallel":
         """
         Moves and/or casts the parameters and buffers.
@@ -273,7 +282,7 @@ class ShardedDataParallel(nn.Module):
         self.refresh_trainable()
 
     def refresh_trainable(self) -> None:
-        """ If the module trainability has changed, update all the assumptions """
+        """If the module trainability has changed, update all the assumptions"""
 
         # Make sure that this is not done while gradients are waiting to be reduced (if no_sync context for instance)
         if functools.reduce(lambda x, y: x or y, self._grad_to_be_reduced, False):
@@ -600,8 +609,8 @@ class ShardedDataParallel(nn.Module):
 
     def _consume_work_handles(self) -> None:
         """Consume all the futures which are tied to this optimizer's buckets.
-            We start from the first/older ones, since they are the most likely to be ready and non-blocking
-            """
+        We start from the first/older ones, since they are the most likely to be ready and non-blocking
+        """
 
         while len(self._work_handles) > 0:
             work_handle = self._work_handles.popleft()
@@ -628,7 +637,10 @@ class ShardedDataParallel(nn.Module):
                 self._work_handles.append(
                     Workhandle(
                         handle=dist.reduce(
-                            tensor=bucket.buffer, dst=bucket.destination, group=self._process_group, async_op=True,
+                            tensor=bucket.buffer,
+                            dst=bucket.destination,
+                            group=self._process_group,
+                            async_op=True,
                         ),
                         callback=None,
                     )
@@ -648,9 +660,10 @@ class ShardedDataParallel(nn.Module):
             # - the whole model is not trainable but we still have grad hooks
             trainability_changed |= not self.training and len(self._grad_hooks) > 0
 
-            if trainability_changed:
+            if self._warn_on_trainable_params_changed and trainability_changed:
                 logging.warning(
-                    "ShardedDDP detected that the trainable params changed, either because of eval/train mode or parameter freezing/unfreeze."
+                    "ShardedDDP detected that the trainable params changed, "
+                    "either because of eval/train mode or parameter freezing/unfreeze."
                 )
                 self._reference_trainable_mask = trainable_mask
 
