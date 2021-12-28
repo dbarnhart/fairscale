@@ -8,7 +8,7 @@ from torch import nn
 
 from fairscale.nn import FullyShardedDataParallel as FSDP
 from fairscale.nn import auto_wrap, enable_wrap
-from fairscale.utils.testing import dist_init
+from fairscale.utils.testing import dist_init, teardown
 
 
 def wrap_transformer_only(module, recurse, **kwargs):
@@ -99,6 +99,9 @@ class TestHFTransformersAutoWrap(unittest.TestCase):
         print("Build model ...")
         self.model = TransformerWithLMHead()
         self.model.to(self.device)
+
+    def tearDown(self) -> None:
+        teardown()
 
     def test_auto_wrap_hf_model(self):
 

@@ -1078,7 +1078,7 @@ class FullyShardedDataParallel(nn.Module):
                             p._fp32_shard.copy_(local_shard.view_as(p._fp32_shard))
                         if safe_to_free:
                             free_storage_(full_tensor)
-                    self._free_full_params()
+                    self.has_full_params = False
                     self._use_fp32_param_shard()
                     if self.ssd_offload:
                         # Store tensors in the SSD buffer and free param storage.
