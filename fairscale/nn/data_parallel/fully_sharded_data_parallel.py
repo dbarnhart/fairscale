@@ -285,7 +285,7 @@ class FullyShardedDataParallel(nn.Module):
         module: nn.Module,
         process_group: Optional[ProcessGroup] = None,
         reshard_after_forward: bool = True,
-        reshard_after_backward: bool = True,
+        reshard_after_backward: Optional[bool] = None,
         mixed_precision: bool = False,
         fp32_reduce_scatter: bool = False,
         flatten_parameters: bool = True,
@@ -305,6 +305,10 @@ class FullyShardedDataParallel(nn.Module):
     ):
         init_start = time.time()
         super().__init__()
+
+        if reshard_after_backward is None:
+            reshard_after_backward = reshard_after_forward
+
         self.process_group = process_group or get_process_group_cached()
         self.rank = self.process_group.rank()
         self.world_size = self.process_group.size()
@@ -1074,7 +1078,7 @@ class FullyShardedDataParallel(nn.Module):
                             p._fp32_shard.copy_(local_shard.view_as(p._fp32_shard))
                         if safe_to_free:
                             free_storage_(full_tensor)
-                    self.has_full_params = False
+                    self._free_full_params()
                     self._use_fp32_param_shard()
                     if self.ssd_offload:
                         # Store tensors in the SSD buffer and free param storage.
@@ -1324,7 +1328,10 @@ class FullyShardedDataParallel(nn.Module):
 
         # All-gather full parameters. This will also transfer FP32 parameters to
         # ``self.compute_dtype`` (e.g., FP16 if *mixed_precision* is ``True``).
-        self._rebuild_full_params()
+        if self.ssd_offload or not self.has_full_params:
+            self._rebuild_full_params()
+        else:
+            self._use_full_params()
 
         # Register backward hooks to reshard params and reduce-scatter grads.
         # These need to be re-registered every forward pass.
@@ -1332,10 +1339,8 @@ class FullyShardedDataParallel(nn.Module):
 
         outputs = self.module(*args, **kwargs)
 
-        if self.reshard_after_forward:
+        if self.reshard_after_forward and self.has_full_params:
             self._free_full_params()
-            if self.mixed_precision or self.move_params_to_cpu:
-                self._free_fp16_param_shard()
 
         # Switch to main FP32 param shard. We maintain this invariant throughout
         # the code, i.e., ``p.data == p._fp32_shard`` after each function. This
@@ -1558,19 +1563,13 @@ class FullyShardedDataParallel(nn.Module):
         if param.grad.requires_grad:
             raise RuntimeError("FSDP only works with gradients that don't require gradients")
 
-        if self._require_backward_grad_sync and self.reshard_after_backward:
+        if self._require_backward_grad_sync and self.reshard_after_backward and self.has_full_params:
             # Free full params. As a special case, we don't free the full params
             # when in a ``no_sync`` context (as inversely indicated by
             # ``self._require_backward_grad_sync``), since the params will not
             # get updated before the next forward. This saves networking
             # bandwidth but uses more GPU memory.
             self._free_full_params([param])
-
-        if self.mixed_precision:
-            # This is a no-op if reshard_after_forward is True, since we already
-            # free the param shard when rebuilding the full params in the
-            # pre_backward_hook.
-            self._free_fp16_param_shard([param])
 
         # Switch to FP32 shard after backward.
         self._use_fp32_param_shard([param])
@@ -1707,8 +1706,13 @@ class FullyShardedDataParallel(nn.Module):
             """Helper used below on all fsdp modules."""
             # Make sure full parameters are freed, so that they are gathered fresh for the next forward pass. Otherwise,
             # we will not have the updated parameters if resharding is disabled for both forward and backward.
-            if fsdp_module._require_backward_grad_sync and self.has_full_params:
-                fsdp_module._free_full_params()
+            if fsdp_module._require_backward_grad_sync:
+                if fsdp_module.has_full_params:
+                    fsdp_module._free_full_params()
+                # Parameters that were frozen will not have had a post-backward pass to restore the fp32 shards, so we
+                # do here to be sure. This method is idempotent, in case of redundancy.
+                fsdp_module._use_fp32_param_shard()
+
             for p in fsdp_module.params:
                 if not p.requires_grad:
                     continue
@@ -1807,6 +1811,8 @@ class FullyShardedDataParallel(nn.Module):
                     assert p._fp16_shard is not None
                     p.data = p._fp16_shard
                     output_tensors.append((p.data, True))
+                elif self.move_params_to_cpu and force_full_precision:
+                    output_tensors.append((p.data, True))
                 else:
                     # Here p.data == p._fp32_shard, so it's not safe to free.
                     output_tensors.append((p.data, False))
@@ -1849,20 +1855,23 @@ class FullyShardedDataParallel(nn.Module):
         with torch.cuda.stream(self._streams["all_gather"]):
             if (self.mixed_precision or self.move_params_to_cpu) and not force_full_precision:
                 self._cast_fp32_param_shards_to_fp16()
+                allocated_fp16_shard = True
+            else:
+                allocated_fp16_shard = False
 
-            if self.move_params_to_cpu:
-                if force_full_precision:
-                    # If the compute_dtype and storage dtype are the same,
-                    # use pinned memory. Otherwise move p.data to the compute
-                    # device.
-                    if self.params[0].dtype == self.compute_dtype:
-                        self._cast_fp32_param_shards_to_fp16()
-                    else:
-                        for p in self.params:
-                            p.data = p.data.to(self.compute_device)
+            if self.move_params_to_cpu and force_full_precision:
+                # If the compute_dtype and storage dtype are the same,
+                # use pinned memory. Otherwise move p.data to the compute
+                # device.
+                if self.params[0].dtype == self.compute_dtype:
+                    self._cast_fp32_param_shards_to_fp16()
+                else:
+                    for p in self.params:
+                        p.data = p.data.to(self.compute_device)
 
             for p in self.params:
                 if not p._is_sharded:  # e.g., when world_size == 1
+                    # Retain the fp16 shard, if any, since it's the full parameter storage in this case.
                     update_p_data()
                 else:
                     # Skip if already built. Only shared param can be rebuilt multiple times.
@@ -1876,7 +1885,7 @@ class FullyShardedDataParallel(nn.Module):
 
                     p_size = p._full_param_padded.size()
                     assert p_size.numel() % self.world_size == 0
-                    if self.mixed_precision and force_full_precision:
+                    if (self.mixed_precision or self.move_params_to_cpu) and force_full_precision:
                         # Allocate fresh tensor in full precision since we are in
                         # mixed precision and full precision rebuild is asked.
                         output_tensor = p_data.new_zeros(p_size)
@@ -1897,10 +1906,7 @@ class FullyShardedDataParallel(nn.Module):
                     # Set p.data = output_tensor (with padding trimmed)
                     update_p_data(output_tensor)
 
-                    if (self.mixed_precision or self.move_params_to_cpu) and not force_full_precision:
-                        self._free_fp16_param_shard([p])
-
-                    if self.move_params_to_cpu and (self.params[0].dtype == self.compute_dtype):
+                    if allocated_fp16_shard:
                         self._free_fp16_param_shard([p])
 
         torch.cuda.current_stream().wait_stream(self._streams["all_gather"])
@@ -2483,7 +2489,7 @@ def auto_wrap_bn(
             # **must** be False because BN's FSDP wrapper's pre-backward callback isn't called
             # within the checkpoint's outer backward when multiple forward passes are used.
             "reshard_after_forward": False,
-            "reshard_after_backward": True,
+            "reshard_after_backward": False,
             # No bucketing or small bucketing should be enough for BNs.
             "bucket_cap_mb": 0,
             # Setting this for SyncBatchNorm. This may have a performance impact. If

@@ -50,6 +50,10 @@ class TestGradAcc(DistributedTest):
 
     @classmethod
     def _test_transformer(self, rank, group, config, use_no_sync_context=True):
+        # Transformer tests need to force higher precision when tensor cores are available.
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+
         model = self.get_wrapped_model(group, config=config, add_bn=False)
         model.eval()  # turn off dropout for the test
         self._test_grad_acc(model, batch_dim=1, use_no_sync_context=use_no_sync_context)
@@ -146,10 +150,10 @@ class TestGradAccCommunication(DistributedTest):
             #   num_fsdp all-gathers in the forward
             #   num_fsdp-1 all-gathers in the backward (except root)
             # outside no_sync:
-            #   num_fsdp-1 all-gathers in the forward (except root)
+            #   0 all-gathers in the forward (except root)
             #   num_fsdp-1 all-gathers in the backward (except root)
             expected_all_gather1 = 2 * num_fsdp - 1
-            expected_all_gather2 = expected_all_gather1 + (2 * num_fsdp - 2)
+            expected_all_gather2 = expected_all_gather1 + (num_fsdp - 1)
         else:
             # inside no_sync:
             #   num_fsdp all-gathers in the forward
