@@ -72,32 +72,55 @@ class FlatParameter(nn.Parameter):
             self._param_numels
         ), f"Something wrong with __new__ method, {self.numel()} vs. {sum(self._param_numels)}"
         self._param_shapes = [p.size() for p in params]
+        self._param_meta = [dict(p.__dict__) for p in params]
 
         # These are set by FPW class below, not by this class itself.
         self._param_infos: List[Tuple[str, nn.Module, str]] = []
         self._shared_param_infos: List[Tuple[str, str, nn.Module, str, nn.Module, str]] = []
 
-    def get_param_views(self, external_data: Optional[Tensor] = None) -> Iterator[Tensor]:
+    def get_param_views(
+        self,
+        external_data: Optional[Tensor] = None,
+        local: bool = False,
+    ) -> Iterator[Tensor]:
         """Return a generator of views that map to the original parameters."""
         # Note, self.data could be sharded, so its numel is <= to the sum.
         assert self.data.numel() <= sum(
             self._param_numels
         ), f"Incorrect internal state {self.data.numel()} vs. {sum(self._param_numels)}"
         data = external_data if external_data is not None else self
-        if data.numel() != sum(self._param_numels):
+        if data.numel() != sum(self._param_numels) and not local:
             raise ValueError(
                 f"Incorrect numel of supplied data: got {data.numel()} but expected {sum(self._param_numels)}"
             )
-        return (t.view(s) for (t, s) in zip(data.split(self._param_numels), self._param_shapes))
+
+        views = []
+        count = 0
+        for (numels, shape, meta) in zip(self._param_numels, self._param_shapes, self._param_meta):
+            if data.shape[0] < count:
+                break
+
+            # FSDP shards greedily, so this is the correct local slice.
+            next_count = count + numels
+            view = data[count:next_count]
+            count = next_count
+
+            if not local:
+                assert view.numel() == shape.numel()
+                view = view.view(shape)
+            view.__dict__.update(**meta)
+            views.append(view)
+
+        return tuple(views)
 
     def metadata(self) -> Tuple[List[str], List[torch.Size], List[int]]:
         """Return tuple of (names, shapes, numels) metadata for this flat parameter."""
         names = [".".join([m, n]) if m else n for (m, _, n) in self._param_infos]
-        return names, self._param_shapes, self._param_numels
+        return names, self._param_shapes, self._param_numels, self._param_meta
 
     def __setstate__(self, state: Tuple[Any, Any, Any, Any]) -> None:
         """Use by pickle to set the internal states."""
-        (self._param_numels, self._param_shapes, self._param_infos, self._shared_param_infos) = state
+        (self._param_numels, self._param_shapes, self._param_meta, self._param_infos, self._shared_param_infos) = state
         assert self.numel() <= sum(
             self._param_numels
         ), f"Incorrect pickling {self.numel()} vs. {sum(self._param_numels)}"
@@ -109,7 +132,7 @@ class FlatParameter(nn.Parameter):
             # Args to the callable above
             ([self.data], self.requires_grad),
             # Args to __setstate__
-            (self._param_numels, self._param_shapes, self._param_infos, self._shared_param_infos),
+            (self._param_numels, self._param_shapes, self._param_meta, self._param_infos, self._shared_param_infos),
         )
 
 

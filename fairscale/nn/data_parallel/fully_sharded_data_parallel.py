@@ -353,10 +353,15 @@ class FullyShardedDataParallel(nn.Module):
         # shard any leftover parameters.
         param_names = []
         params = []
-        for param_name, param in module.named_parameters():
-            if not hasattr(param, "_is_sharded"):
-                param_names.append(param_name)
-                params.append(param)
+        if isinstance(module, FlattenParamsWrapper):
+            assert flatten_parameters
+            param_names = module.flat_param_names
+            params = module.flat_params
+        else:
+            for param_name, param in module.named_parameters():
+                if not hasattr(param, "_is_sharded"):
+                    param_names.append(param_name)
+                    params.append(param)
 
         self._has_params = len(params) > 0
         self._has_shared_params = False
@@ -374,18 +379,22 @@ class FullyShardedDataParallel(nn.Module):
             self.move_grads_to_cpu = True
             self.move_params_to_cpu = True
 
-        # For now, it is either all flatten or none flatten. This will be extended to
-        # multiple flatten groups in my next PR.
-        to_be_flatten_params: List[List[Parameter]] = [[]]
-        non_flatten_params = params
-        param_name_groups = [[n] for n in param_names]
         if self.flatten_parameters:
-            to_be_flatten_params = [params]
+            if not isinstance(module, FlattenParamsWrapper):
+                to_be_flatten_params = [params]
+                param_name_groups = [param_names]
+            else:
+                to_be_flatten_params = params
+                param_name_groups = param_names
             non_flatten_params = []
-            param_name_groups = [param_names]
+        else:
+            to_be_flatten_params: List[List[Parameter]] = [[]]
+            non_flatten_params = params
+            param_name_groups = [[n] for n in param_names]
         del param_names
-
-        self._fsdp_wrapped_module: nn.Module = FlattenParamsWrapper(module, param_list=to_be_flatten_params)
+        if not isinstance(module, FlattenParamsWrapper):
+            module = FlattenParamsWrapper(module, param_list=to_be_flatten_params)
+        self._fsdp_wrapped_module: nn.Module = module
         del module  # free original module in case it helps garbage collection
 
         # Now, in this FSDP wrapper class, we keep a list of to-be-flatten and not-to-be-flatten
@@ -2008,18 +2017,20 @@ class FullyShardedDataParallel(nn.Module):
                 for i, p in enumerate(m.params):
                     if i < m._num_flatten_params:
                         backing_param_name = m.module.flat_param_names[i]
-                        names, shapes, numels = m.module.metadata(i)
+                        names, shapes, numels, metas = m.module.metadata(i)
                     else:
                         assert len(m._param_name_groups[i]) == 1
                         backing_param_name = m._param_name_groups[i][0]
                         names = [backing_param_name]
                         shapes = [p._orig_size]
                         numels = [p._orig_size.numel()]
+                        metas = [{}]
                     backing_param_name = _clean_path(backing_param_name)
                     metadata["params"][backing_param_name] = {
                         "names": [_clean_path(n) for n in names],  # A list of str.
                         "shapes": shapes,  # A list of torch.Size.
                         "numels": numels,  # A list of int.
+                        "metas": metas,
                         "padding": m.numel_padded_per_param[i],  # An int for padding added to the backing parameter.
                     }
                 param_metadata.append(metadata)
@@ -2089,11 +2100,13 @@ class FullyShardedDataParallel(nn.Module):
                         break
                 full_param = torch.cat(shards, dim=0)
                 # (Potentially), split the full param and create original params.
-                names, shapes, numels, _ = v.values()
+                names, shapes, numels, metas, _ = v.values()
                 assert sum(numels) == full_param.size(0)
-                for n, t, s in zip(names, full_param.split(numels), shapes):
+                for n, t, s, m in zip(names, full_param.split(numels), shapes, metas):
                     out_state_dict_key = ".".join([fsdp_path, n]) if fsdp_path else n
-                    consolidated_weights[out_state_dict_key] = t.view(s)
+                    t = t.view(s)
+                    t.__dict__.update(**m)
+                    consolidated_weights[out_state_dict_key] = t
 
         # copy shared parameters
         for src_path, dest_path in metadata["shared_param_info"]:
