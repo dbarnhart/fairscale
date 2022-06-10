@@ -426,6 +426,8 @@ class FullyShardedDataParallel(nn.Module):
 
         # Flag to indicate if the full params are gathered.
         self.has_full_params: bool = False
+        # Hold on to grad tensors on the host until it's safe for other streams to use their memory.
+        self.grad_cache = []
 
         # Register hook after state_dict() to remove the "_fsdp_wrapped_module."
         # prefix and before load_state_dict() to add it back.
@@ -1348,7 +1350,7 @@ class FullyShardedDataParallel(nn.Module):
 
         outputs = self.module(*args, **kwargs)
 
-        if self.reshard_after_forward and self.has_full_params:
+        if self.reshard_after_forward:
             self._free_full_params()
 
         # Switch to main FP32 param shard. We maintain this invariant throughout
@@ -1572,7 +1574,7 @@ class FullyShardedDataParallel(nn.Module):
         if param.grad.requires_grad:
             raise RuntimeError("FSDP only works with gradients that don't require gradients")
 
-        if self._require_backward_grad_sync and self.reshard_after_backward and self.has_full_params:
+        if self._require_backward_grad_sync and self.reshard_after_backward:
             # Free full params. As a special case, we don't free the full params
             # when in a ``no_sync`` context (as inversely indicated by
             # ``self._require_backward_grad_sync``), since the params will not
@@ -1588,9 +1590,12 @@ class FullyShardedDataParallel(nn.Module):
 
         # Wait for all work in the current stream to finish, then start the
         # reductions in post_backward stream.
+        self._streams["all_gather"].wait_stream(self._streams["post_backward"])
+        torch.cuda.current_stream().wait_stream(self._streams["post_backward"])
         self._streams["post_backward"].wait_stream(torch.cuda.current_stream())
+        self.grad_cache.clear()
         with torch.cuda.stream(self._streams["post_backward"]):
-            orig_grad_data = param.grad.data
+            self.grad_cache.append(param.grad.data)
 
             if self.mixed_precision and self.fp32_reduce_scatter:
                 # Cast grad to FP32.
@@ -1628,13 +1633,6 @@ class FullyShardedDataParallel(nn.Module):
                 # case grads should be all-reduced here.
                 assert self.world_size == 1
                 self._post_reduction_hook(param, param.grad.data)
-
-            # After _post_backward_hook returns, orig_grad_data will eventually
-            # go out of scope, at which point it could otherwise be freed for
-            # further reuse by the main stream while the div/reduce_scatter/copy
-            # are underway in the post_backward stream. See:
-            # github.com/NVIDIA/apex/blob/master/apex/parallel/distributed.py
-            orig_grad_data.record_stream(self._streams["post_backward"])
 
     def _post_reduction_hook(self, param: Parameter, reduced_grad: torch.Tensor) -> None:
         """Hook to call on each param after the reduce-scatter."""
@@ -1711,13 +1709,15 @@ class FullyShardedDataParallel(nn.Module):
         if self._reducer is not None:
             self._reducer.teardown()
 
+        torch.cuda.synchronize(self.compute_device)
+        self.grad_cache.clear()
+
         def _finalize_parameters(fsdp_module: FullyShardedDataParallel) -> None:
             """Helper used below on all fsdp modules."""
             # Make sure full parameters are freed, so that they are gathered fresh for the next forward pass. Otherwise,
             # we will not have the updated parameters if resharding is disabled for both forward and backward.
             if fsdp_module._require_backward_grad_sync:
-                if fsdp_module.has_full_params:
-                    fsdp_module._free_full_params()
+                fsdp_module._free_full_params()
                 # Parameters that were frozen will not have had a post-backward pass to restore the fp32 shards, so we
                 # do here to be sure. This method is idempotent, in case of redundancy.
                 fsdp_module._use_fp32_param_shard()
@@ -1779,6 +1779,7 @@ class FullyShardedDataParallel(nn.Module):
                     # clear this list for next iteration
                     assert self._output_pre_backward_hook_registered is not None
                     self._output_pre_backward_hook_registered.clear()
+        torch.cuda.synchronize(self.compute_device)
 
     @torch.no_grad()
     def _rebuild_full_params(self, force_full_precision: bool = False) -> Optional[List[Tuple[torch.Tensor, bool]]]:
@@ -1919,6 +1920,8 @@ class FullyShardedDataParallel(nn.Module):
                         self._free_fp16_param_shard([p])
 
         torch.cuda.current_stream().wait_stream(self._streams["all_gather"])
+        self._streams["all_gather"].wait_stream(torch.cuda.current_stream())
+        torch.cuda.synchronize(self.compute_device)
         return output_tensors
 
     @torch.no_grad()
