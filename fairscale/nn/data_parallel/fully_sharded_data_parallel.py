@@ -1921,7 +1921,6 @@ class FullyShardedDataParallel(nn.Module):
 
         torch.cuda.current_stream().wait_stream(self._streams["all_gather"])
         self._streams["all_gather"].wait_stream(torch.cuda.current_stream())
-        torch.cuda.synchronize(self.compute_device)
         return output_tensors
 
     @torch.no_grad()
