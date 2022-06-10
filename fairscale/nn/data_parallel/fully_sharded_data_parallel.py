@@ -1972,7 +1972,7 @@ class FullyShardedDataParallel(nn.Module):
         if params is None:
             params = self.params
         self.has_full_params = False
-        current_stream = torch.cuda.current_stream()
+        # current_stream = torch.cuda.current_stream()
         for p in params:
             if not p._is_sharded:  # e.g., world_size == 1
                 if self.mixed_precision or self.move_params_to_cpu:
@@ -1980,7 +1980,7 @@ class FullyShardedDataParallel(nn.Module):
                 continue
             # Don't let PyTorch reuse this memory until all work in the current
             # stream is complete.
-            p._full_param_padded.record_stream(current_stream)
+            # p._full_param_padded.record_stream(current_stream)
             # There may be external references to the Tensor Storage that we
             # can't modify, such as references that are created by
             # ctx.save_for_backward in the forward pass. Thus when we
